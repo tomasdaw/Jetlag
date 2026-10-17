@@ -164,8 +164,8 @@
   }
   map.on('zoomend', updateStationLabels);
 
-  // Ruled-out / out-of-bounds fill: teal diagonal hatch defined in index.html.
-  const HATCH_STYLE = { stroke: false, fillColor: 'url(#jl-hatch)', fillOpacity: 0.88 };
+  // Ruled-out / out-of-bounds fill: dark navy diagonal hatch defined in index.html.
+  const HATCH_STYLE = { stroke: false, fillColor: 'url(#jl-hatch)', fillOpacity: 0.7 };
 
   function pointIcon(letter, cls) {
     return L.divIcon({ className: '', html: `<div class="pt-icon ${cls}">${letter}</div>`, iconSize: [28, 28], iconAnchor: [14, 14] });
@@ -310,11 +310,17 @@
     if (preset.type === 'station-buffer') {
       const gj = await (await fetch(preset.source)).json();
       const extra = preset.includeStations || {};
-      const points = gj.features
-        .filter((f) => f.properties.kind === 'station')
+      const stations = gj.features.filter((f) => f.properties.kind === 'station');
+      const points = stations
         .filter((f) => (preset.includeSystems || []).includes(f.properties.system) || (extra[f.properties.system] || []).includes(f.properties.name))
         .map((f) => f.geometry.coordinates);
-      const shape = Geo.stationBufferArea(points, preset.radiusM / 1000, (preset.smoothM || 0) / 1000);
+      const routes = (preset.includeRoutes || []).map((r) => r.stations.map((name) => {
+        const f = stations.find((s) => s.properties.system === r.system && s.properties.name === name);
+        if (!f) console.warn(`Play area: station "${name}" not found`);
+        return f && f.geometry.coordinates;
+      }).filter(Boolean));
+      routes.forEach((r) => points.push(...r));
+      const shape = Geo.stationBufferArea(points, preset.radiusM / 1000, (preset.smoothM || 0) / 1000, routes);
       return { type: 'Feature', properties: { name: preset.label, stations: points.length }, geometry: shape.geometry };
     }
     const gj = await (await fetch(preset.url)).json();
@@ -718,10 +724,16 @@
   document.querySelector('.tabs').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-tab]');
     if (!b) return;
+    const sheet = $('#sheet');
+    // On phones, tapping the open tab again folds the panel down.
+    if (b.dataset.tab === activeTab && !sheet.classList.contains('collapsed') && window.innerWidth < 820) {
+      sheet.classList.add('collapsed');
+      return;
+    }
     activeTab = b.dataset.tab;
     document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('active', x === b));
     ['ask', 'log', 'setup'].forEach((t) => ($('#tab-' + t).hidden = t !== activeTab));
-    $('#sheet').classList.remove('collapsed');
+    sheet.classList.remove('collapsed');
   });
 
   $('#sheet').addEventListener('click', (e) => {
@@ -815,6 +827,8 @@
 
   // ---------------------------------------------------------------- start
   renderAll();
+  // Phones start with the panel folded so the map gets the screen.
+  if (window.innerWidth < 820) $('#sheet').classList.add('collapsed');
   loadPlayArea().then(fitRegion).catch((err) => {
     console.error(err);
     toast('Could not load the play area');

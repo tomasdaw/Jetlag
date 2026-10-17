@@ -71,14 +71,27 @@ window.GAME_CONFIG = {
       // Métro envelope: one smooth outline around the whole métro network.
       // The large smoothM merges everything (including Laval and Longueuil)
       // into a single area with no gaps.
+      // Plus a corridor along the REM's western branch out to Anse-à-l'Orme
+      // (by Île Bizard). The Deux-Montagnes branch and the South Shore are left out.
       'transit-core': {
-        label: 'Métro area (around the whole network)',
+        label: 'Métro area + REM to Anse-à-l\'Orme',
         type: 'station-buffer',
         source: 'data/montreal-transit.geojson',
         radiusM: 1000,
         smoothM: 2500,
         includeSystems: ['metro'], // every station of these systems
-        includeStations: {}, // e.g. { rem: ['McGill', 'Gare Centrale'] }
+        includeStations: {}, // single extra stations, e.g. { rem: ['Île-des-Soeurs'] }
+        // Station sequences joined into a corridor `radiusM` wide on each side.
+        includeRoutes: [
+          {
+            system: 'rem',
+            stations: [
+              'Gare Centrale', 'Édouard-Montpetit', 'Canora', 'Ville-de-Mont-Royal', 'Côte-de-Liesse',
+              'Montpellier', 'Du Ruisseau', 'Bois-Franc', 'Des Sources', 'Fairview-Pointe-Claire',
+              'Kirkland', 'Anse-à-l\'Orme',
+            ],
+          },
+        ],
       },
       'montreal-island': {
         label: 'Island of Montréal',

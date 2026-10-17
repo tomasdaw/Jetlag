@@ -126,13 +126,18 @@
     return region;
   }
 
-  // Union of circles around each point, then a morphological "closing"
-  // (grow by smoothKm, shrink by smoothKm) to round off the scalloped edge and
-  // fill small gaps between neighbouring circles.
-  function stationBufferArea(points, radiusKm, smoothKm) {
+  // Union of circles around each point (plus corridors along `routes`, each a
+  // list of points joined in order), then a morphological "closing" (grow by
+  // smoothKm, shrink by smoothKm) to round off the scalloped edge and fill
+  // small gaps between neighbouring circles.
+  function stationBufferArea(points, radiusKm, smoothKm, routes = []) {
     if (!points.length) return null;
-    const circles = points.map((p) => turf.circle(p, radiusKm, { steps: 48, units: 'kilometers' }));
-    let area = circles.length === 1 ? circles[0] : turf.union(turf.featureCollection(circles));
+    const shapes = points.map((p) => turf.circle(p, radiusKm, { steps: 48, units: 'kilometers' }));
+    routes.filter((r) => r.length > 1).forEach((r) => {
+      const corridor = turf.buffer(turf.lineString(r), radiusKm, { units: 'kilometers', steps: 16 });
+      if (corridor) shapes.push(corridor);
+    });
+    let area = shapes.length === 1 ? shapes[0] : turf.union(turf.featureCollection(shapes));
     if (area && smoothKm > 0) {
       const grown = turf.buffer(area, smoothKm, { units: 'kilometers', steps: 16 });
       const closed = grown && turf.buffer(grown, -smoothKm, { units: 'kilometers', steps: 16 });
