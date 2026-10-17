@@ -42,8 +42,16 @@
 
   let state = load();
   const enabledTypes = Object.keys(QCFG).filter((t) => QCFG[t].enabled);
-  // opt = chosen option id per question type, e.g. { radar: 'r-1', thermometer: 't-3' }
-  const draft = { type: enabledTypes[0], opt: {}, customRadius: '', a: null, b: null };
+  // The question being set up. Saved with the game so a reload mid-thermometer
+  // (A set, seekers still travelling) doesn't lose point A.
+  // opt = chosen option id per question type, e.g. { radar: 'rk-1', thermometer: 'tk-5' }
+  // bLive = point B follows the seekers' GPS.
+  const draft = Object.assign(
+    { type: enabledTypes[0], opt: {}, customRadius: '', a: null, b: null, bLive: false, reachedNotified: false },
+    state.draft || {}
+  );
+  if (!enabledTypes.includes(draft.type)) draft.type = enabledTypes[0];
+  state.draft = draft;
   let mode = null; // null | 'seeker' | 'thermoA' | 'thermoB' | 'draw'
   let drawPoints = [];
   let gpsWatchId = null;
@@ -341,14 +349,30 @@
 
   // ---------------------------------------------------------------- seeker location
   function setSeeker(p, source, accuracy) {
-    state.seeker = { lat: p.lat, lng: p.lng, source, accuracy: accuracy || null };
+    state.seeker = { lat: p.lat, lng: p.lng, source, accuracy: accuracy || null, at: Date.now() };
+    // Thermometer: point B follows the seekers live once A is set from GPS.
+    if (source === 'gps' && draft.bLive && draft.a) {
+      draft.b = { lat: p.lat, lng: p.lng };
+      announceThermoReached();
+    }
     save();
     renderSeeker();
     renderDraftOverlay();
-    if (activeTab === 'ask') renderAsk();
+    // Don't rebuild the panel under someone typing a custom radius.
+    if (activeTab === 'ask' && document.activeElement?.id !== 'custom-radius') renderAsk();
   }
 
-  function startGps() {
+  // Tell the seekers once when they have travelled far enough for the thermometer.
+  function announceThermoReached() {
+    const t = thermoStatus();
+    if (t.ok && !draft.reachedNotified) {
+      draft.reachedNotified = true;
+      toast(`Thermometer: ${t.o.label} reached — you can ask now`);
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+    }
+  }
+
+  function startGps(quiet) {
     if (!('geolocation' in navigator)) { toast('This browser has no GPS access. Place your position on the map instead.'); return; }
     let first = true;
     gpsWatchId = navigator.geolocation.watchPosition(
@@ -357,18 +381,61 @@
         if (first) { map.setView([pos.coords.latitude, pos.coords.longitude], Math.max(map.getZoom(), 14)); first = false; }
       },
       (err) => {
-        toast(err.code === 1 ? 'Location permission denied. Place your position on the map instead.' : 'Could not get GPS: ' + err.message);
-        stopGps();
+        if (err.code === 1) {
+          toast('Location permission denied. Allow location for this site in your browser settings, or place your position on the map.');
+          stopGps();
+        } else {
+          // Timeouts and lost signal (tunnels, métro) are temporary: keep watching.
+          toast('GPS signal weak — still trying');
+        }
       },
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 }
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 }
     );
+    state.gpsOn = true;
+    save();
+    keepAwake(true);
     $('#btn-gps').classList.add('on');
-    toast('Following GPS');
+    if (!quiet) toast('Following GPS — the screen stays on while GPS is running');
+    renderAll();
   }
   function stopGps() {
     if (gpsWatchId !== null) navigator.geolocation.clearWatch(gpsWatchId);
     gpsWatchId = null;
+    state.gpsOn = false;
+    draft.bLive = false;
+    save();
+    keepAwake(false);
     $('#btn-gps').classList.remove('on');
+    renderAll();
+  }
+
+  // Keep the screen on while following GPS: a locked phone pauses location in
+  // the browser. Released automatically when the page is hidden, so re-request
+  // when it comes back.
+  let wakeLock = null;
+  async function keepAwake(on) {
+    try {
+      if (on && 'wakeLock' in navigator && !wakeLock) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      } else if (!on && wakeLock) {
+        await wakeLock.release();
+        wakeLock = null;
+      }
+    } catch (e) { /* not supported or refused: GPS still works, screen may lock */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && gpsWatchId !== null) keepAwake(true);
+  });
+
+  // Turn GPS back on after a reload if it was on and permission is already granted
+  // (no prompt appears without a tap).
+  async function resumeGps() {
+    if (!state.gpsOn || !navigator.permissions) return;
+    try {
+      const p = await navigator.permissions.query({ name: 'geolocation' });
+      if (p.state === 'granted') startGps(true);
+    } catch (e) { /* permissions API not available */ }
   }
 
   // ---------------------------------------------------------------- tap-the-map modes
@@ -410,9 +477,9 @@
       setSeeker(p, 'manual');
       exitMode();
     } else if (mode === 'thermoA') {
-      draft.a = p; exitMode(); renderAsk(); renderDraftOverlay();
+      draft.a = p; draft.reachedNotified = false; exitMode(); save(); renderAsk(); renderDraftOverlay();
     } else if (mode === 'thermoB') {
-      draft.b = p; exitMode(); renderAsk(); renderDraftOverlay();
+      draft.b = p; draft.bLive = false; exitMode(); save(); renderAsk(); renderDraftOverlay();
     } else if (mode === 'draw') {
       drawPoints.push(p); renderBanner(); renderDrawing();
     }
@@ -534,7 +601,7 @@
       params = { optionId: t.o.id, a: lngLat(draft.a), b: lngLat(draft.b) };
     }
     state.log.push({ id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()), type: draft.type, params, answer: null, askedAt: Date.now(), answeredAt: null });
-    if (draft.type === 'thermometer') { draft.a = null; draft.b = null; }
+    if (draft.type === 'thermometer') { draft.a = null; draft.b = null; draft.bLive = false; draft.reachedNotified = false; }
     save();
     recompute();
     renderAll();
@@ -579,7 +646,13 @@
   function seekerStatus() {
     const s = state.seeker;
     if (!s) return '<span class="val">Not set</span>';
-    if (s.source === 'gps') return `<span class="val set">GPS${s.accuracy ? ` ±${Math.round(s.accuracy)} m` : ''}</span>`;
+    if (s.source === 'gps') {
+      const age = s.at ? Math.round((Date.now() - s.at) / 1000) : null;
+      const acc = s.accuracy ? ` ±${Math.round(s.accuracy)} m` : '';
+      if (gpsWatchId === null) return `<span class="val warn-text">Last GPS fix${acc} (GPS off)</span>`;
+      if (age != null && age > 60) return `<span class="val warn-text">GPS${acc} · ${Math.round(age / 60)} min old</span>`;
+      return `<span class="val set">GPS live${acc}</span>`;
+    }
     return '<span class="val set">Placed on map</span>';
   }
   function pointStatus(p) {
@@ -639,7 +712,12 @@
         <div class="point"><div><div class="label"><span class="badge a">A</span>Start</div>${pointStatus(draft.a)}</div>
           <div class="row"><button class="btn small" data-act="a-here" ${state.seeker ? '' : 'disabled'}>My position</button><button class="btn small" data-act="tap-a">Tap map</button></div></div>
         <div class="point"><div><div class="label"><span class="badge b">B</span>End</div>${pointStatus(draft.b)}</div>
-          <div class="row"><button class="btn small" data-act="b-here" ${state.seeker ? '' : 'disabled'}>My position</button><button class="btn small" data-act="tap-b">Tap map</button></div></div>
+          <div class="row">${draft.bLive
+            ? '<button class="btn small" data-act="b-here">Freeze here</button>'
+            : gpsWatchId !== null && draft.a
+              ? '<button class="btn small" data-act="b-live">Follow GPS</button>'
+              : `<button class="btn small" data-act="b-here" ${state.seeker ? '' : 'disabled'}>My position</button>`}<button class="btn small" data-act="tap-b">Tap map</button></div></div>
+        ${draft.bLive ? '<p class="muted live-note">● B is following your GPS. Ask once you have travelled far enough.</p>' : ''}
         ${progress || (t.o ? '<p class="muted">Set A when you start moving, then B once you have travelled far enough.</p>' : '<p class="muted">Pick a distance first.</p>')}
         <button class="btn primary block" data-act="ask" ${t.ok ? '' : 'disabled'}>Ask thermometer question</button>`;
     }
@@ -755,6 +833,8 @@
       case 'type': draft.type = b.dataset.type; renderAsk(); renderDraftOverlay(); break;
       case 'option':
         draft.opt[b.dataset.type] = b.dataset.opt;
+        draft.reachedNotified = false;
+        save();
         renderAsk();
         renderDraftOverlay();
         if (selectedOption('radar')?.custom && b.dataset.type === 'radar') $('#custom-radius')?.focus();
@@ -772,8 +852,16 @@
       case 'tap-seeker': enterMode('seeker'); break;
       case 'tap-a': enterMode('thermoA'); break;
       case 'tap-b': enterMode('thermoB'); break;
-      case 'a-here': draft.a = { lat: state.seeker.lat, lng: state.seeker.lng }; renderAsk(); renderDraftOverlay(); break;
-      case 'b-here': draft.b = { lat: state.seeker.lat, lng: state.seeker.lng }; renderAsk(); renderDraftOverlay(); break;
+      case 'a-here':
+        draft.a = { lat: state.seeker.lat, lng: state.seeker.lng };
+        // With GPS running, B then follows the seekers until they ask.
+        draft.bLive = gpsWatchId !== null;
+        draft.b = draft.bLive ? { lat: state.seeker.lat, lng: state.seeker.lng } : draft.b;
+        draft.reachedNotified = false;
+        save(); renderAsk(); renderDraftOverlay();
+        break;
+      case 'b-here': draft.b = { lat: state.seeker.lat, lng: state.seeker.lng }; draft.bLive = false; save(); renderAsk(); renderDraftOverlay(); break;
+      case 'b-live': draft.bLive = true; draft.b = { lat: state.seeker.lat, lng: state.seeker.lng }; save(); renderAsk(); renderDraftOverlay(); break;
       case 'ask': askQuestion(); break;
       case 'answer': answerPending(b.dataset.answer); break;
       case 'undo': undoLast(); break;
@@ -845,6 +933,7 @@
     toast('Could not load the play area');
   });
   loadMetro().catch((err) => console.warn('Could not load métro data', err));
+  resumeGps();
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));

@@ -148,6 +148,7 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .cost.warn { color: var(--accent); font-weight: 600; }
 .ok { color: var(--ok); font-weight: 700; }
 .warn-text { color: var(--accent); }
+.live-note { color: var(--ok); }
 input[type=number] {
   width: 90px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--bg); color: var(--text); font: inherit;
