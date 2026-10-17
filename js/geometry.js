@@ -129,10 +129,12 @@
   // Union of circles around each point (plus corridors along `routes`, each a
   // list of points joined in order), then a morphological "closing" (grow by
   // smoothKm, shrink by smoothKm) to round off the scalloped edge and fill
-  // small gaps between neighbouring circles.
-  function stationBufferArea(points, radiusKm, smoothKm, routes = []) {
+  // small gaps between neighbouring circles. `extraShapes` (e.g. a whole
+  // island) are merged in as they are.
+  function stationBufferArea(points, radiusKm, smoothKm, routes = [], extraShapes = []) {
     if (!points.length) return null;
     const shapes = points.map((p) => turf.circle(p, radiusKm, { steps: 48, units: 'kilometers' }));
+    shapes.push(...extraShapes);
     routes.filter((r) => r.length > 1).forEach((r) => {
       const corridor = turf.buffer(turf.lineString(r), radiusKm, { units: 'kilometers', steps: 16 });
       if (corridor) shapes.push(corridor);

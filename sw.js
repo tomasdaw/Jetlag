@@ -1,7 +1,7 @@
 // Service worker: makes the app installable and keeps working with a flaky
 // connection (e.g. in the métro). Network first, so updates show up right away;
 // cached copy when offline. Map tiles are left to the browser cache.
-const CACHE = 'jlc-v5';
+const CACHE = 'jlc-v6';
 const SHELL = [
   './',
   'index.html',
@@ -10,6 +10,7 @@ const SHELL = [
   'js/geometry.js',
   'js/app.js',
   'data/montreal-island.geojson',
+  'data/ile-des-soeurs.geojson',
   'data/montreal-transit.geojson',
   'manifest.webmanifest',
   'icons/icon.svg',

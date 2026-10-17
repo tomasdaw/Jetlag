@@ -320,7 +320,18 @@
         return f && f.geometry.coordinates;
       }).filter(Boolean));
       routes.forEach((r) => points.push(...r));
-      const shape = Geo.stationBufferArea(points, preset.radiusM / 1000, (preset.smoothM || 0) / 1000, routes);
+      const areas = await Promise.all((preset.includeAreas || []).map(async (url) => {
+        const a = await (await fetch(url)).json();
+        return a.type === 'FeatureCollection' ? a.features[0] : a;
+      }));
+      // Corridors along real track geometry.
+      gj.features
+        .filter((f) => f.properties.kind === 'line' && (preset.includeLines || []).includes(String(f.properties.ref)))
+        .forEach((f) => {
+          const corridor = turf.buffer(f, preset.radiusM / 1000, { units: 'kilometers', steps: 8 });
+          if (corridor) areas.push(corridor);
+        });
+      const shape = Geo.stationBufferArea(points, preset.radiusM / 1000, (preset.smoothM || 0) / 1000, routes, areas);
       return { type: 'Feature', properties: { name: preset.label, stations: points.length }, geometry: shape.geometry };
     }
     const gj = await (await fetch(preset.url)).json();
