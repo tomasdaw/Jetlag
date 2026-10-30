@@ -149,6 +149,19 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .ok { color: var(--ok); font-weight: 700; }
 .warn-text { color: var(--accent); }
 .live-note { color: var(--ok); }
+
+/* ---------- city search ---------- */
+#city-q {
+  flex: 1; min-width: 0; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--text); font: inherit;
+}
+.check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-right: 10px; }
+.check input { accent-color: var(--accent); }
+.city-results { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.city-result {
+  text-align: left; border: 1px solid var(--line); background: var(--panel-2); border-radius: 10px; padding: 8px 12px;
+}
+.city-result span { display: block; font-size: 12px; color: var(--muted); }
 input[type=number] {
   width: 90px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--bg); color: var(--text); font: inherit;

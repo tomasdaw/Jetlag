@@ -60,6 +60,30 @@ window.GAME_CONFIG = {
     },
   },
 
+  // Playing outside Montréal: search a city, download its transit from
+  // OpenStreetMap and build the play area around it the same way.
+  citySearch: {
+    nominatimUrl: 'https://nominatim.openstreetmap.org/search',
+    // Tried in order until one answers (the public servers can be busy).
+    overpassUrls: [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.private.coffee/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+    ],
+    serverTimeoutS: 75, // give up on one server after this and try the next
+    // OSM route types offered. subway = métro / underground.
+    routeTypes: {
+      subway: { label: 'Métro / subway', default: true },
+      light_rail: { label: 'Light rail (REM, DLR…)', default: true },
+    },
+    // Play area: radiusM around every station plus a corridor along the track,
+    // smoothed like the Montréal default.
+    radiusM: 1000,
+    smoothM: 2500,
+    followLines: true,
+  },
+
   // Display units for distances: 'km' or 'mi'. Players can switch in Setup.
   defaultUnits: 'km',
 

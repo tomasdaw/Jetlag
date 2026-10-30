@@ -19,6 +19,7 @@ Then open http://localhost:8080. No build step, and no Node or Python needed.
 | `config/game-config.js` | **All game rules**: radar and thermometer options (metric and imperial editions), game sizes, repeat costs, play-area presets, map and transit styling. |
 | `js/geometry.js` | Pure geometry engine (Turf.js): circles, bisector half-planes, station-buffer play areas, replaying the log into a region. No DOM. |
 | `js/app.js` | Map, UI, question flow, log/undo, GPS and manual position, local save. |
+| `js/citydata.js` | Worldwide play: city search (OSM Nominatim) and métro/light-rail download (OSM Overpass), cached per device. |
 | `data/montreal-transit.geojson` | STM métro and REM lines and stations (OpenStreetMap). |
 | `data/montreal-island.geojson` | Island of Montréal boundary (OpenStreetMap relation 3430571, simplified). |
 | `sw.js`, `manifest.webmanifest`, `icons/` | PWA: installable to the home screen, works offline for the app shell. |

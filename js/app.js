@@ -113,7 +113,8 @@
   }
 
   // ---------------------------------------------------------------- map
-  const map = L.map('map', { zoomControl: false, attributionControl: true }).setView(CFG.map.center, CFG.map.zoom);
+  const map = L.map('map', { zoomControl: false, attributionControl: true })
+    .setView(state.city ? state.city.center : CFG.map.center, state.city ? 12 : CFG.map.zoom);
   L.tileLayer(CFG.map.tiles.url, { attribution: CFG.map.tiles.attribution, maxZoom: CFG.map.tiles.maxZoom }).addTo(map);
 
   const layers = {
@@ -132,13 +133,45 @@
   map.createPane('metro').style.zIndex = 450;
   const metroLayer = L.layerGroup();
 
+  // ---- transit data: Montréal's built-in file, or a city downloaded from OpenStreetMap
+  const CITY_KEY = 'jetlag-companion/city-transit';
+  let transitCache = null; // { key, data }
+  const transitKey = () => (state.city ? `city:${state.city.label}` : 'montreal');
+
+  async function transitData() {
+    const key = transitKey();
+    if (transitCache && transitCache.key === key) return transitCache.data;
+    let data = null;
+    if (state.city) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(CITY_KEY));
+        if (saved && saved.key === key) data = saved.data;
+      } catch (e) { /* no cache */ }
+      if (!data) {
+        toast(`Downloading ${state.city.name} transit…`);
+        data = await CityData.loadTransit(state.city.bbox, state.city.routeTypes, toast);
+        cacheCityTransit(key, data);
+      }
+    } else {
+      data = await (await fetch(CFG.map.metro.url)).json();
+    }
+    transitCache = { key, data };
+    return data;
+  }
+  function cacheCityTransit(key, data) {
+    try { localStorage.setItem(CITY_KEY, JSON.stringify({ key, data })); } catch (e) { /* too big: re-download next time */ }
+  }
+
   async function loadMetro() {
     const mc = CFG.map.metro;
     if (!mc) return;
-    const gj = await (await fetch(mc.url)).json();
+    metroLayer.clearLayers();
+    const gj = await transitData();
     const lines = gj.features.filter((f) => f.properties.kind === 'line');
     const stations = gj.features.filter((f) => f.properties.kind === 'station');
-    const lineStyle = (f) => mc.lines[f.properties.ref] || { name: `Line ${f.properties.ref}`, colour: f.properties.colour || '#666' };
+    // Montréal lines use the official names/colours from config; other cities use OSM's.
+    const lineStyle = (f) => (!state.city && mc.lines[f.properties.ref])
+      || { name: f.properties.name || `Line ${f.properties.ref}`, colour: f.properties.colour || '#666' };
     L.geoJSON(lines, { pane: 'metro', interactive: false, style: { color: '#fff', weight: 8, opacity: 0.9, lineCap: 'round' } }).addTo(metroLayer);
     L.geoJSON(lines, {
       pane: 'metro',
@@ -149,7 +182,7 @@
     const labelled = new Set();
     stations.forEach((f) => {
       const [lng, lat] = f.geometry.coordinates;
-      const outline = (mc.stationStyle && mc.stationStyle[f.properties.system]) || { color: '#1b1b1b' };
+      const outline = (mc.stationStyle && mc.stationStyle[f.properties.system === 'light_rail' ? 'rem' : f.properties.system]) || { color: '#1b1b1b' };
       const m = L.circleMarker([lat, lng], { pane: 'metro', radius: 4, color: outline.color, weight: 1.5, fillColor: '#fff', fillOpacity: 1 });
       if (!labelled.has(f.properties.name)) {
         labelled.add(f.properties.name);
@@ -305,6 +338,22 @@
   async function loadPlayArea() {
     if (state.playAreaId === 'custom' && state.customPlayArea) {
       playArea = state.customPlayArea;
+    } else if (state.city) {
+      const key = transitKey();
+      if (!presetCache[key]) {
+        const data = await transitData();
+        const cc = CFG.citySearch;
+        presetCache[key] = await buildPreset({
+          label: `${state.city.name} transit area`,
+          type: 'station-buffer',
+          data,
+          radiusM: cc.radiusM,
+          smoothM: cc.smoothM,
+          includeSystems: ['metro', 'light_rail'],
+          includeLines: cc.followLines ? data.features.filter((f) => f.properties.kind === 'line').map((f) => String(f.properties.ref)) : [],
+        });
+      }
+      playArea = presetCache[key];
     } else {
       const id = CFG.playArea.presets[state.playAreaId] ? state.playAreaId : CFG.playArea.defaultPreset;
       if (!presetCache[id]) presetCache[id] = await buildPreset(CFG.playArea.presets[id]);
@@ -316,7 +365,7 @@
   const presetCache = {};
   async function buildPreset(preset) {
     if (preset.type === 'station-buffer') {
-      const gj = await (await fetch(preset.source)).json();
+      const gj = preset.data || await (await fetch(preset.source)).json();
       const extra = preset.includeStations || {};
       const stations = gj.features.filter((f) => f.properties.kind === 'station');
       const points = stations
@@ -759,10 +808,110 @@
       <ul class="log">${items}</ul>`;
   }
 
+  // ---- city search (Setup). UI-only state, not saved.
+  let cityResults = null;
+  let cityBusy = '';
+  let cityQuery = '';
+
+  async function runCitySearch() {
+    const q = cityQuery.trim();
+    if (!q) return;
+    cityBusy = 'Searching…';
+    cityResults = null;
+    renderSetup();
+    try {
+      cityResults = await CityData.searchCities(q);
+      cityBusy = cityResults.length ? '' : 'No places found. Try the city name in English or its local name.';
+    } catch (e) {
+      cityBusy = 'Search failed. Check your connection and try again.';
+    }
+    renderSetup();
+  }
+
+  // Keep the downloaded area to a city-sized box around the centre: some
+  // admin areas (e.g. Tokyo) include far-away islands.
+  function clampBbox([s, w, n, e], [lat, lng], maxSpan = 0.8) {
+    const h = maxSpan / 2;
+    return [Math.max(s, lat - h), Math.max(w, lng - h), Math.min(n, lat + h), Math.min(e, lng + h)];
+  }
+
+  async function chooseCity(i) {
+    const c = cityResults && cityResults[i];
+    if (!c) return;
+    if (state.log.length && !(await confirmDialog(`Switch to ${c.name}? This clears the ${state.log.length} question${state.log.length > 1 ? 's' : ''} in the current game.`, 'Switch'))) return;
+    const routeTypes = Object.keys(CFG.citySearch.routeTypes).filter((t) => $(`#rt-${t}`)?.checked);
+    if (!routeTypes.length) { toast('Pick at least one kind of transit'); return; }
+    const next = { name: c.name, label: c.label, center: c.center, bbox: clampBbox(c.bbox, c.center), routeTypes };
+    const key = `city:${next.label}`;
+    cityBusy = `Downloading ${c.name} transit from OpenStreetMap… (can take up to a minute)`;
+    renderSetup();
+    let data;
+    try {
+      data = await CityData.loadTransit(next.bbox, routeTypes, (msg) => { cityBusy = msg; renderSetup(); });
+    } catch (e) {
+      console.error(e);
+      cityBusy = 'Download failed (the OpenStreetMap servers may be busy). Try again in a minute.';
+      renderSetup();
+      return;
+    }
+    const nStations = data.features.filter((f) => f.properties.kind === 'station').length;
+    if (!nStations) {
+      cityBusy = `No métro or light-rail stations found for ${c.name} in OpenStreetMap.`;
+      renderSetup();
+      return;
+    }
+    cacheCityTransit(key, data);
+    transitCache = { key, data };
+    cityBusy = '';
+    cityResults = null;
+    startGameIn(next);
+    toast(`${c.name}: ${nStations} stations`);
+  }
+
+  // Switch city (null = back to Montréal) and start a fresh game there.
+  function startGameIn(city) {
+    state.city = city;
+    state.playAreaId = city ? 'city' : CFG.playArea.defaultPreset;
+    state.log = [];
+    Object.assign(draft, { a: null, b: null, bLive: false, reachedNotified: false });
+    outsideMask = null;
+    save();
+    map.setView(city ? city.center : CFG.map.center, city ? 12 : CFG.map.zoom);
+    loadMetro().catch((err) => console.warn('Could not load transit', err));
+    loadPlayArea().then(fitRegion).catch((err) => { console.error(err); toast('Could not build the play area'); });
+    renderAll();
+  }
+
+  function renderCitySection() {
+    const types = CFG.citySearch.routeTypes;
+    const chosen = state.city ? state.city.routeTypes : Object.keys(types).filter((t) => types[t].default);
+    return `
+      <h3>City</h3>
+      <div class="point"><div><div class="label">${esc(state.city ? state.city.name : 'Montréal')}</div>
+        <div class="val">${esc(state.city ? state.city.label : 'Built in: métro + REM')}</div></div>
+        ${state.city ? '<button class="btn small" data-act="city-montreal">Back to Montréal</button>' : ''}</div>
+      <div class="row">
+        <input id="city-q" type="search" placeholder="Search a city, e.g. Paris, Tokyo" value="${esc(cityQuery)}" autocomplete="off">
+        <button class="btn small primary" data-act="city-search">Search</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        ${Object.entries(types).map(([id, t]) => `<label class="check"><input type="checkbox" id="rt-${id}" ${chosen.includes(id) ? 'checked' : ''}> ${esc(t.label)}</label>`).join('')}
+      </div>
+      ${cityBusy ? `<p class="muted">${esc(cityBusy)}</p>` : ''}
+      ${cityResults && cityResults.length ? `<div class="city-results">${cityResults.map((r, i) => `
+        <button class="city-result" data-act="city-pick" data-i="${i}"><b>${esc(r.name)}</b><span>${esc(r.label)}</span></button>`).join('')}</div>` : ''}
+      <p class="muted">Lines and stations come from OpenStreetMap. Picking a city starts a new game there.</p>`;
+  }
+
   function renderSetup() {
-    const presets = Object.entries(CFG.playArea.presets).map(([id, p]) =>
-      `<label class="radio"><input type="radio" name="pa" value="${esc(id)}" ${state.playAreaId === id ? 'checked' : ''}> ${esc(p.label)}</label>`).join('');
+    const presets = state.city
+      ? `<label class="radio"><input type="radio" name="pa" value="city" ${state.playAreaId === 'city' ? 'checked' : ''}> ${esc(state.city.name)} transit area</label>`
+      : Object.entries(CFG.playArea.presets).map(([id, p]) =>
+        `<label class="radio"><input type="radio" name="pa" value="${esc(id)}" ${state.playAreaId === id ? 'checked' : ''}> ${esc(p.label)}</label>`).join('');
+    const focused = document.activeElement && document.activeElement.id === 'city-q';
     $('#tab-setup').innerHTML = `
+      ${renderCitySection()}
+
       <h3>Play area</h3>
       ${presets}
       ${state.customPlayArea ? `<div class="radio">
@@ -801,6 +950,7 @@
 
       <h3>Game</h3>
       <button class="btn danger" data-act="reset">Reset game (clear all questions)</button>`;
+    if (focused) $('#city-q')?.focus();
   }
 
   function renderAll() {
@@ -840,6 +990,12 @@
         if (selectedOption('radar')?.custom && b.dataset.type === 'radar') $('#custom-radius')?.focus();
         break;
       case 'size': state.gameSize = b.dataset.size; save(); renderAll(); break;
+      case 'city-search': runCitySearch(); break;
+      case 'city-pick': chooseCity(+b.dataset.i); break;
+      case 'city-montreal':
+        (state.log.length ? confirmDialog('Go back to Montréal? This clears the questions in the current game.', 'Switch') : Promise.resolve(true))
+          .then((ok) => { if (ok) startGameIn(null); });
+        break;
       case 'edition':
         state.edition = b.dataset.edition;
         state.units = CFG.editions[state.edition].units; // show distances the way the book does
@@ -894,7 +1050,12 @@
     }
   });
 
+  $('#sheet').addEventListener('keydown', (e) => {
+    if (e.target.id === 'city-q' && e.key === 'Enter') { e.preventDefault(); runCitySearch(); }
+  });
+
   $('#sheet').addEventListener('input', (e) => {
+    if (e.target.id === 'city-q') { cityQuery = e.target.value; return; }
     if (e.target.id === 'custom-radius') {
       draft.customRadius = e.target.value;
       const btn = document.querySelector('#tab-ask [data-act="ask"]');
