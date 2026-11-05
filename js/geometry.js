@@ -148,6 +148,22 @@
     return area;
   }
 
+  // Hiding zones. A station is still possible if any part of its zone (circle
+  // of rKm around it) lies in the region.
+  function zonePossible(region, coord, rKm) {
+    if (!region) return false;
+    if (turf.booleanPointInPolygon(coord, region)) return true;
+    return !!intersect(region, turf.circle(coord, rKm, { steps: 32, units: 'kilometers' }));
+  }
+  // Where the hider can actually be: the region, limited to the zones of the
+  // stations still possible.
+  function zonesArea(region, coords, rKm) {
+    if (!region || !coords.length) return null;
+    const circles = coords.map((c) => turf.circle(c, rKm, { steps: 32, units: 'kilometers' }));
+    const union = circles.length === 1 ? circles[0] : turf.union(turf.featureCollection(circles));
+    return intersect(region, union);
+  }
+
   function areaKm2(feature) {
     return feature ? turf.area(feature) / 1e6 : 0;
   }
@@ -162,6 +178,8 @@
     bisectorLine,
     distanceKm,
     stationBufferArea,
+    zonePossible,
+    zonesArea,
     areaKm2,
   };
 })();

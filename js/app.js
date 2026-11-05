@@ -56,7 +56,9 @@
   let drawPoints = [];
   let gpsWatchId = null;
   let playArea = null;
-  let region = null;
+  let region = null; // where the answers allow the hider to be
+  let hiderArea = null; // region limited to the remaining hiding zones (= region when zones are off)
+  let focusStation = null; // station picked in the Stations tab (its zone is outlined)
   let outsideMask = null; // darkened world-minus-play-area, cached per play area
   let activeTab = 'ask';
 
@@ -178,20 +180,55 @@
       style: (f) => ({ color: lineStyle(f).colour, weight: 5, opacity: 1, lineCap: 'round' }),
       onEachFeature: (f, l) => l.bindTooltip(lineStyle(f).name, { sticky: true }),
     }).addTo(metroLayer);
-    // Interchange stations (e.g. McGill) exist in both systems; label them once.
-    const labelled = new Set();
+    // One entry per hiding station. Same-named stops close together (e.g. the
+    // McGill métro and REM stations) are one station with one label.
+    const mergeKm = CFG.hidingZones.mergeSameNameKm;
+    stationList = [];
     stations.forEach((f) => {
       const [lng, lat] = f.geometry.coordinates;
       const outline = (mc.stationStyle && mc.stationStyle[f.properties.system === 'light_rail' ? 'rem' : f.properties.system]) || { color: '#1b1b1b' };
       const m = L.circleMarker([lat, lng], { pane: 'metro', radius: 4, color: outline.color, weight: 1.5, fillColor: '#fff', fillOpacity: 1 });
-      if (!labelled.has(f.properties.name)) {
-        labelled.add(f.properties.name);
+      let st = stationList.find((s) => s.name === f.properties.name && Geo.distanceKm(s.coord, [lng, lat]) < mergeKm);
+      if (!st) {
+        st = { id: stationList.length, name: f.properties.name, coord: [lng, lat], markers: [] };
+        stationList.push(st);
         m.bindTooltip(f.properties.name, { permanent: true, direction: 'right', offset: [6, 0], className: 'station-label' });
       }
+      st.markers.push(m);
       m.addTo(metroLayer);
     });
+    stationsInPlayCache = null;
     if (state.showMetro) metroLayer.addTo(map);
     updateStationLabels();
+    recompute();
+  }
+
+  // ---- hiding zones
+  let stationList = []; // [{id, name, coord, markers}]
+  let stationsInPlayCache = null; // { area, list }
+  let zoneInfo = null; // { possible: Set(id), list, radiusKm } when zones are on
+  const zonesOn = () => state.useZones !== false;
+  const zoneRadiusKm = () => CFG.hidingZones.radiusKm[state.edition]?.[state.gameSize] || 0.5;
+
+  // Stations the hider may use: those inside the play area.
+  function stationsInPlay() {
+    if (!playArea) return [];
+    if (!stationsInPlayCache || stationsInPlayCache.area !== playArea) {
+      stationsInPlayCache = { area: playArea, list: stationList.filter((s) => turf.booleanPointInPolygon(s.coord, playArea)) };
+    }
+    return stationsInPlayCache.list;
+  }
+
+  // Grey out the dots (and labels) of stations the answers have ruled out.
+  function updateStationMarkers() {
+    stationList.forEach((s) => {
+      const out = zoneInfo && !zoneInfo.possible.has(s.id);
+      s.markers.forEach((m) => {
+        m.setStyle(out ? { fillColor: '#7c8696', fillOpacity: 0.6, opacity: 0.5 } : { fillColor: '#fff', fillOpacity: 1, opacity: 1 });
+        const tip = m.getTooltip() && m.getTooltip().getElement();
+        if (tip) tip.classList.toggle('out', !!out);
+      });
+    });
   }
 
   function updateStationLabels() {
@@ -243,12 +280,15 @@
     }
     L.geoJSON(playArea, { style: { color: '#0f1b2d', weight: 1.5, opacity: 0.5, dashArray: '6 6', fill: false }, interactive: false }).addTo(layers.playArea);
 
-    const excluded = region ? Geo.difference(playArea, region) : playArea;
+    const excluded = hiderArea ? Geo.difference(playArea, hiderArea) : playArea;
     if (excluded) {
       L.geoJSON(excluded, { style: HATCH_STYLE, interactive: false }).addTo(layers.excluded);
     }
-    if (region) {
-      L.geoJSON(region, { style: { color: '#ffb020', weight: 1.5, opacity: 0.45, fill: false }, interactive: false }).addTo(layers.region);
+    if (hiderArea) {
+      L.geoJSON(hiderArea, { style: { color: '#ffb020', weight: 1.5, opacity: 0.45, fill: false }, interactive: false }).addTo(layers.region);
+    }
+    if (focusStation) {
+      L.circle(latLng(focusStation.coord), { radius: zoneRadiusKm() * 1000, color: '#ffb020', weight: 3, fill: false, dashArray: '6 4', interactive: false }).addTo(layers.region);
     }
 
     if (state.showOverlays) {
@@ -304,25 +344,38 @@
   function renderStat() {
     const el = $('#area-stat');
     if (!playArea) { el.textContent = 'Loading…'; return; }
-    if (!region) {
+    if (!hiderArea) {
       el.className = 'stat empty';
-      el.innerHTML = '<b>No possible area</b> — check answers';
+      el.innerHTML = zoneInfo ? '<b>No station possible</b> — check answers' : '<b>No possible area</b> — check answers';
       return;
     }
     const total = Geo.areaKm2(playArea);
-    const left = Geo.areaKm2(region);
+    const left = Geo.areaKm2(hiderArea);
     el.className = 'stat';
-    el.innerHTML = `<b>${fmtArea(left)}</b> left · ${Math.round((left / total) * 100)}%`;
+    el.innerHTML = zoneInfo
+      ? `<b>${zoneInfo.possible.size}</b>/${zoneInfo.list.length} stations · ${fmtArea(left)}`
+      : `<b>${fmtArea(left)}</b> left · ${Math.round((left / total) * 100)}%`;
   }
 
   function recompute() {
     region = playArea ? Geo.computeRegion(playArea, state.log, QCFG) : null;
+    hiderArea = region;
+    zoneInfo = null;
+    const list = stationsInPlay();
+    if (zonesOn() && playArea && list.length) {
+      const r = zoneRadiusKm();
+      const possible = list.filter((s) => Geo.zonePossible(region, s.coord, r));
+      hiderArea = Geo.zonesArea(region, possible.map((s) => s.coord), r);
+      zoneInfo = { possible: new Set(possible.map((s) => s.id)), list, radiusKm: r };
+    }
+    updateStationMarkers();
     renderMap();
     renderStat();
+    renderStations();
   }
 
   function fitRegion() {
-    const target = region || playArea;
+    const target = hiderArea || playArea;
     map.invalidateSize();
     if (!target) return;
     // Keep the area clear of the panel (left on wide screens, bottom on phones).
@@ -786,6 +839,33 @@
     }).join('')}</div>`;
   }
 
+  // Stations tab: which stations the hider could still be hiding at.
+  function renderStations() {
+    const el = $('#tab-stations');
+    $('#station-count').textContent = zoneInfo ? zoneInfo.possible.size : '';
+    if (!zonesOn()) {
+      el.innerHTML = '<p class="muted">Hiding zones are off (Setup → Hiding zones). Turn them on to see which stations the hider could be at.</p>';
+      return;
+    }
+    if (!zoneInfo) {
+      el.innerHTML = '<p class="muted">Loading stations…</p>';
+      return;
+    }
+    const me = state.seeker ? [state.seeker.lng, state.seeker.lat] : null;
+    const withDist = (s) => Object.assign({}, s, { d: me ? Geo.distanceKm(me, s.coord) : null });
+    const sortList = (arr) => arr.map(withDist).sort((a, b) => (me ? a.d - b.d : a.name.localeCompare(b.name)));
+    const possible = sortList(zoneInfo.list.filter((s) => zoneInfo.possible.has(s.id)));
+    const out = sortList(zoneInfo.list.filter((s) => !zoneInfo.possible.has(s.id)));
+    const row = (s, ruled) => `<li><button class="station-row ${ruled ? 'out' : ''} ${focusStation && focusStation.id === s.id ? 'focus' : ''}" data-act="station-focus" data-id="${s.id}">
+        <span>${esc(s.name)}</span>${s.d != null ? `<span class="muted">${fmtDist(s.d)}</span>` : ''}</button></li>`;
+    el.innerHTML = `
+      <p class="muted">Hiding zone: ${fmtDist(zoneInfo.radiusKm)} around a station (${esc(CFG.gameSizes[state.gameSize].label.toLowerCase())} game).
+        ${me ? 'Sorted by distance from you.' : 'Set your position to sort by distance.'} Tap a station to see its zone.</p>
+      <h3>Still possible (${possible.length})</h3>
+      ${possible.length ? `<ul class="stations">${possible.map((s) => row(s, false)).join('')}</ul>` : '<p class="muted">None: the answers rule out every station. Check the log.</p>'}
+      ${out.length ? `<details><summary>Ruled out (${out.length})</summary><ul class="stations">${out.map((s) => row(s, true)).join('')}</ul></details>` : ''}`;
+  }
+
   function renderLog() {
     const el = $('#tab-log');
     $('#log-count').textContent = state.log.length || '';
@@ -875,6 +955,7 @@
     state.log = [];
     Object.assign(draft, { a: null, b: null, bLive: false, reachedNotified: false });
     outsideMask = null;
+    focusStation = null;
     save();
     map.setView(city ? city.center : CFG.map.center, city ? 12 : CFG.map.zoom);
     loadMetro().catch((err) => console.warn('Could not load transit', err));
@@ -939,6 +1020,7 @@
       </div>
 
       <h3>Map</h3>
+      <label class="radio"><input type="checkbox" id="use-zones" ${zonesOn() ? 'checked' : ''}> Hiding zones: the hider is within ${fmtDist(zoneRadiusKm())} of a station</label>
       <label class="radio"><input type="checkbox" id="show-overlays" ${state.showOverlays ? 'checked' : ''}> Show question circles and lines</label>
       ${CFG.map.metro ? `<label class="radio"><input type="checkbox" id="show-metro" ${state.showMetro ? 'checked' : ''}> Show métro and REM lines and stations</label>` : ''}
 
@@ -971,7 +1053,7 @@
     }
     activeTab = b.dataset.tab;
     document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('active', x === b));
-    ['ask', 'log', 'setup'].forEach((t) => ($('#tab-' + t).hidden = t !== activeTab));
+    ['ask', 'log', 'stations', 'setup'].forEach((t) => ($('#tab-' + t).hidden = t !== activeTab));
     sheet.classList.remove('collapsed');
   });
 
@@ -989,7 +1071,26 @@
         renderDraftOverlay();
         if (selectedOption('radar')?.custom && b.dataset.type === 'radar') $('#custom-radius')?.focus();
         break;
-      case 'size': state.gameSize = b.dataset.size; save(); renderAll(); break;
+      case 'size': state.gameSize = b.dataset.size; save(); renderAll(); recompute(); break; // zone radius depends on size
+      case 'station-focus': {
+        const s = stationList.find((x) => x.id === +b.dataset.id);
+        if (!s) break;
+        focusStation = focusStation && focusStation.id === s.id ? null : s;
+        if (focusStation) {
+          const z = Math.max(map.getZoom(), 15);
+          let target = L.latLng(latLng(s.coord));
+          if (window.innerWidth < 820) {
+            $('#sheet').classList.add('collapsed');
+          } else {
+            // Centre it in the part of the map not covered by the side panel.
+            target = map.unproject(map.project(target, z).subtract([200, 0]), z);
+          }
+          map.flyTo(target, z);
+        }
+        renderMap();
+        renderStations();
+        break;
+      }
       case 'city-search': runCitySearch(); break;
       case 'city-pick': chooseCity(+b.dataset.i); break;
       case 'city-montreal':
@@ -1002,7 +1103,7 @@
         draft.opt = {};
         save();
         renderAll();
-        renderStat();
+        recompute();
         break;
       case 'gps': if (gpsWatchId === null) startGps(); else toast('Already following GPS'); break;
       case 'tap-seeker': enterMode('seeker'); break;
@@ -1069,6 +1170,10 @@
       state.playAreaId = e.target.value;
       save();
       loadPlayArea().then(fitRegion);
+    } else if (e.target.id === 'use-zones') {
+      state.useZones = e.target.checked;
+      save();
+      recompute();
     } else if (e.target.id === 'show-overlays') {
       state.showOverlays = e.target.checked;
       save();
@@ -1101,5 +1206,5 @@
   }
 
   // Exposed for debugging in the console.
-  window.JLC = { map, get state() { return state; }, get region() { return region; }, recompute, renderAll, save };
+  window.JLC = { map, get state() { return state; }, get region() { return region; }, get hiderArea() { return hiderArea; }, get zoneInfo() { return zoneInfo; }, recompute, renderAll, save };
 })();

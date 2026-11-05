@@ -27,6 +27,19 @@ window.GAME_CONFIG = {
   },
   defaultGameSize: 'small',
 
+  // The hider ends the hiding period at a station; their zone is a circle
+  // around it (rulebook p.5: 500 m small/medium, 1 km large). A station stays
+  // possible while any part of its zone survives the answers.
+  hidingZones: {
+    enabledByDefault: true,
+    radiusKm: {
+      metric: { small: 0.5, medium: 0.5, large: 1 },
+      imperial: { small: 0.402, medium: 0.402, large: 0.805 }, // ¼ mi / ½ mi
+    },
+    // Stations with the same name closer than this count as one (e.g. McGill métro + REM).
+    mergeSameNameKm: 0.5,
+  },
+
   // Asking the same question again is allowed, but the hider's reward is
   // multiplied: 2nd time ×2, 3rd time ×3, … (rulebook: Asking Questions).
   // Set to false to block repeats instead.
